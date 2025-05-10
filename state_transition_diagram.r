@@ -1,141 +1,125 @@
-#############################################################################################
-###    this code loads networks from a directory                                          ###
-###    based on the number of genes in the network and their values generates states      ###
-###      if in the network, a gene is set to 0, in all states has value 0                 ###
-###      if all genes are set to 0, network is skipped                                    ###
-###    computes attractors with getAttractors()                                           ###
-###    computes path to attractor with getPathToAttractor using states and attractors     ###
-###    generates state transition diagrams                                                ###
-###    save as pdf file                                                                   ###
-#############################################################################################
+# 
+#   STG diagram using getTransitionTable()
+# 
+# 
+# 
 
 
 
 library(BoolNet)
 library(igraph)
 
-# Set working directory
+# Set working directory 
 setwd("Path\\to\\your\\directory")
 
-# Convert a numeric state vector into a compact string.
-vector_to_state <- function(state_vector) {
-  paste(state_vector, collapse = "")
+
+extract_boolean_expressions <- function(file_name) {
+  lines <- readLines(file_name, warn = FALSE)
+  
+  lines <- trimws(lines)
+  lines <- lines[nzchar(lines)]
+  return(lines)
 }
 
-# Function to generate valid states based on fixed gene constraints.
-generate_valid_states <- function(net, fixed_constraints) {
-  genes <- net$genes
-  possible_values <- lapply(genes, function(gene) {
-    if (gene %in% names(fixed_constraints)) {
-      fixed_constraints[[gene]]
-    } else {
-      c(0, 1)
-    }
-  })
-  names(possible_values) <- genes
-  states_df <- expand.grid(possible_values)
-  states_df <- states_df[, genes, drop = FALSE]
-  states <- lapply(seq_len(nrow(states_df)), function(i) as.numeric(states_df[i, ]))
-  return(states)
-}
-
-# ------------------------------
-# Process all .txt files in directory
-# ------------------------------
-all_results <- list()
+# List files and sort them in natural numeric order.
 txt_files <- list.files(pattern = "\\.txt$")
+# This sorts based on the numeric part (i.e. numbers in file names)
+txt_files <- txt_files[order(as.numeric(gsub("\\D", "", txt_files)))]
+
+all_results <- list()
 
 for (file_name in txt_files) {
+  cat("-------------------------------------------------\n")
   cat("Processing network:", file_name, "\n")
   
-  # Load the network
+  
   net <- loadNetwork(file_name)
   print(net)
   
-  # Read network description for fixed constraints
-  network_df <- read.csv(file_name, header = TRUE, stringsAsFactors = FALSE)
-  fixed_constraints <- list()
-  for (j in seq_len(nrow(network_df))) {
-    gene <- trimws(network_df$targets[j])
-    factor_val <- trimws(network_df$factors[j])
-    if (factor_val %in% c("0", "1")) {
-      fixed_constraints[[gene]] <- as.numeric(factor_val)
+  
+  boolean_expressions <- extract_boolean_expressions(file_name)
+  cat("Extracted Boolean expressions:\n")
+  print(boolean_expressions)
+  
+
+  if (length(boolean_expressions) > 1) {
+    assignments <- boolean_expressions[-1]  # remove header
+    all_zero <- TRUE
+    for (line in assignments) {
+      tokens <- strsplit(line, ",")[[1]]
+      if (length(tokens) >= 2) {
+        value <- trimws(tokens[2])
+        if (value != "0") {
+          all_zero <- FALSE
+          break
+        }
+      }
+    }
+    if (all_zero) {
+      cat("Skipping network", file_name, "- all genes are set to 0.\n\n")
+      next
     }
   }
   
-  cat("Fixed constraints for this network:\n")
-  print(fixed_constraints)
+
+  att <- getAttractors(net, type = "synchronous", returnTable = TRUE)
   
-  # Skip network if all genes fixed to 0
-  if (length(fixed_constraints) == length(net$genes) &&
-      all(unlist(fixed_constraints) == 0)) {
-    cat("Skipping network", file_name, "All gene values = 0.\n\n")
+ 
+  tt_text <- capture.output(getTransitionTable(att))
+  
+  
+  transition_lines <- grep("=>", tt_text, value = TRUE)
+  
+ 
+  edges_list <- lapply(transition_lines, function(line) {
+    parts <- strsplit(line, "=>")[[1]]
+    if (length(parts) < 2) return(NULL)
+    from_state <- trimws(parts[1])
+    tokens <- strsplit(trimws(parts[2]), "\\s+")[[1]]
+    if (length(tokens) < 1) return(NULL)
+    to_state <- tokens[1]
+    return(c(from = from_state, to = to_state))
+  })
+  
+
+  edges_list <- Filter(Negate(is.null), edges_list)
+  if (length(edges_list) == 0) {
+    cat("No transitions found for network:", file_name, "\n")
     next
   }
+  edges_mat <- do.call(rbind, edges_list)
+  edges_df <- as.data.frame(edges_mat, stringsAsFactors = FALSE)
+  edges_df <- edges_df[edges_df$from != "" & edges_df$to != "", ]
   
-  # Compute attractors
-  att <- getAttractors(net, "synchronous", returnTable = TRUE)
-  print(att)
+  cat("\nConstructed edges data frame:\n")
+  print(edges_df)
   
-  # Generate valid initial states
-  valid_states <- generate_valid_states(net, fixed_constraints)
-  cat("Valid states:\n")
-  state_labels <- sapply(valid_states, vector_to_state)
-  print(state_labels)
+  g <- graph_from_data_frame(edges_df, directed = TRUE)
   
-  # Compute path to attractors for each state
-  paths <- list()
-  state_mapping <- list()
-  for (state in valid_states) {
-    if (length(state) != length(net$genes)) stop("State length mismatch!")
-    state_label <- vector_to_state(state)
-    cat("Computing path for state:", state_label, "\n")
-    path <- getPathToAttractor(net, state, "all")
-    paths[[state_label]] <- path
-    attractor_state <- vector_to_state(as.numeric(path[nrow(path), ]))
-    state_mapping[[state_label]] <- attractor_state
-    cat("Path for state", state_label, ":\n")
-    print(path)
-  }
-  
-  # Build edge list for igraph
-  edge_list <- c()
-  cat("State mapping:\n")
-  for (init_state in names(state_mapping)) {
-    attractor <- state_mapping[[init_state]]
-    cat(init_state, "results in", attractor, "\n")
-    edge_list <- c(edge_list, init_state, attractor)
-  }
-  
-  g <- graph(edges = edge_list, directed = TRUE)
-  
-  # Optional interactive plot
-  plot(g,
-       vertex.shape = "circle",
-       vertex.size = 40,
-       vertex.color = "lightblue",
-       vertex.label.color = "black",
-       edge.arrow.size = 0.5,
-       main = paste("State-to-Attractor Mapping for", file_name))
   
   all_results[[file_name]] <- list(
     network = net,
     attractors = att,
-    paths = paths,
-    state_mapping = state_mapping,
-    graph = g,
-    description = network_df
+    boolean_expressions = boolean_expressions,
+    edges_df = edges_df,
+    graph = g
   )
   
   cat("Finished processing network:", file_name, "\n\n")
 }
 
-# ------------------------------
-# Save all graphs to a PDF
-# ------------------------------
-pdf("State_to_Attractor_Graphs.pdf", onefile = TRUE, width = 12, height = 8)
-for(nm in names(all_results)) {
+
+ordered_names <- names(all_results)[order(as.numeric(gsub("\\D", "", names(all_results))))]
+all_results <- all_results[ordered_names]
+
+# ------------------------------------------
+# PDF generation
+# ------------------------------------------
+pdf("State_Transition_Graphs.pdf", onefile = TRUE, width = 12, height = 8)
+for (nm in names(all_results)) {
+  
   par(mfrow = c(1, 2), mar = c(4, 4, 4, 2))
+  
   
   g <- all_results[[nm]]$graph
   plot(g,
@@ -144,12 +128,22 @@ for(nm in names(all_results)) {
        vertex.color = "lightblue",
        vertex.label.color = "black",
        edge.arrow.size = 0.5,
-       main = paste("State-to-Attractor Mapping:\n", nm))
+       main = paste("State Transition Mapping:", nm))
+  
   
   plot.new()
-  network_info <- all_results[[nm]]$description
-  info_text <- paste(capture.output(print(network_info)), collapse = "\n")
-  text(0, 1, info_text, adj = c(0, 1), cex = 0.8)
+  boolean_expressions <- all_results[[nm]]$boolean_expressions
+  if (length(boolean_expressions) > 0) {
+    n_lines <- length(boolean_expressions)
+   
+    y_coords <- 0.95 - (0:(n_lines - 1)) * 0.05
+    for (i in seq_along(boolean_expressions)) {
+      text(0, y_coords[i], labels = boolean_expressions[i], adj = c(0, 1), cex = 0.8)
+    }
+  } else {
+    text(0, 0.9, "No Boolean expressions found.", adj = c(0, 1), cex = 0.8)
+  }
 }
 dev.off()
-cat("All graphs have been saved to 'State_to_Attractor_Graphs.pdf'\n")
+
+cat("All graphs along with Boolean expressions have been saved to 'State_Transition_Graphs.pdf'\n")
